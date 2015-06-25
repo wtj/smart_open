@@ -26,6 +26,7 @@ import multiprocessing.pool
 import os
 import subprocess
 import sys
+import tempfile
 
 from boto.compat import BytesIO, urlsplit, six
 import boto.s3.key
@@ -102,6 +103,8 @@ def smart_open(uri, mode="rb"):
             outkey = boto.s3.key.Key(outbucket)
             outkey.key = parsed_uri.key_id
             return S3OpenWrite(outbucket, outkey)
+        elif parsed_uri.scheme in ("hdfs", ):
+            return HdfsOpenWrite(parsed_uri)
         else:
             raise NotImplementedError("write mode not supported for %r scheme", parsed_uri.scheme)
     else:
@@ -485,3 +488,43 @@ def s3_iter_lines(key):
     # process the last line, too
     if buf:
         yield buf
+
+
+class HdfsOpenWrite(object):
+    """
+    Context manager for writing into HDFS files.
+
+    """
+    def __init__(self, parsed_uri):
+        if parsed_uri.scheme not in ("hdfs"):
+            raise TypeError("can only process HDFS files")
+        self.parsed_uri = parsed_uri
+        self.tmp_local_file = tempfile.NamedTemporaryFile(prefix='agency-tmp-')
+
+    def __iter__(self):
+        raise IOError("File not open for reading")
+
+    def write(self, b):
+        self.tmp_local_file.write(b)
+
+    def seek(self, offset, whence=None):
+        raise NotImplementedError("seek() not implemented yet")
+
+    def close(self):
+        try:
+            self.tmp_local_file.flush()
+            hdfs = subprocess.Popen(["hadoop", "fs", "-put", self.tmp_local_file.name, self.parsed_uri.uri_path], stderr=subprocess.PIPE)
+            error = hdfs.stderr.read()
+            if error:
+                logger.exception("encountered error while put file into HDFS:\n" + hdfs.stderr.read())
+        finally:
+            self.tmp_local_file.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, type, value, traceback):
+        try:
+            self.close()
+        except:
+            logger.exception("encountered error while put file into HDFS")
